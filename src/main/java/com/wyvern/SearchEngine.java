@@ -6,6 +6,9 @@ public class SearchEngine {
     private static final int BEAM_WIDTH = 4; // 1단 연산: 상위 K개 후보 수 추출
     private static final int INF = 100000;
 
+    // 🌟 ONNX 신경망 추론 엔진 연결
+    private final OnnxEvaluator nnEvaluator = OnnxEvaluator.getInstance();
+
     /**
      * 와이번 핵심 메인 탐색 엔트리 포인트
      */
@@ -52,11 +55,20 @@ public class SearchEngine {
         return bestMove;
     }
 
-    // [1단] Policy Filtering (신경망 점수 기준 정렬 후 상위 K개 추려내기)
+    // [1단] Policy Filtering (ONNX 모델에서 실제 Policy 배열을 받아와 정렬)
     private List<Move> filterTopKByPolicy(Board board, List<Move> moves, int k) {
+        if (moves.isEmpty()) return moves;
+
+        // 🌟 ONNX 추론: 현재 체스판의 Policy 로짓/확률 배열 추출
+        float[] policyArray = nnEvaluator.predictPolicy(board);
+
         List<Move> sorted = new ArrayList<>(moves);
-        // Policy Score 기준 내림차순 정렬
-        sorted.sort((a, b) -> Integer.compare(b.getPolicyScore(), a.getPolicyScore()));
+        // ONNX Policy Score 기준 내림차순 정렬
+        sorted.sort((a, b) -> Float.compare(
+            nnEvaluator.getMovePolicyScore(b, policyArray),
+            nnEvaluator.getMovePolicyScore(a, policyArray)
+        ));
+
         return sorted.subList(0, Math.min(k, sorted.size()));
     }
 
@@ -68,7 +80,7 @@ public class SearchEngine {
         }
 
         List<Move> moves = filterTopKByPolicy(board, board.getLegalMoves(), BEAM_WIDTH);
-        if (moves.isEmpty()) return board.evaluateStatic();
+        if (moves.isEmpty()) return evaluatePosition(board);
 
         for (Move move : moves) {
             board.makeMove(move);
@@ -83,7 +95,7 @@ public class SearchEngine {
 
     // [3단] Quiescence Search (정적 캡처 연산)
     private int quiescenceSearch(Board board, int alpha, int beta) {
-        int standPat = board.evaluateStatic();
+        int standPat = evaluatePosition(board);
         if (standPat >= beta) return beta;
         if (alpha < standPat) alpha = standPat;
 
@@ -98,5 +110,15 @@ public class SearchEngine {
             if (score > alpha) alpha = score;
         }
         return alpha;
+    }
+
+    // 🌟 [통합 평가 함수] ONNX 신경망 승률 판단(Value) + 전통 정적 기물 평가 하이브리드
+    private int evaluatePosition(Board board) {
+        // ONNX Value 출력값(-1.0 ~ +1.0)을 체스 엔진 센티폰(Centipawn, -1000 ~ +1000) 점수로 스케일링
+        float nnValue = nnEvaluator.predictValue(board);
+        int nnScore = (int) (nnValue * 1000);
+
+        // 신경망의 직관(Value) 70% + 전통 기물 밸런스(evaluateStatic) 30% 보정
+        return (int) (nnScore * 0.7 + board.evaluateStatic() * 0.3);
     }
 }
