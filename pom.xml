@@ -15,6 +15,15 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
+    <dependencies>
+        <!-- ONNX Runtime Java API -->
+        <dependency>
+            <groupId>com.microsoft.onnxruntime</groupId>
+            <artifactId>onnxruntime</artifactId>
+            <version>1.17.1</version>
+        </dependency>
+    </dependencies>
+
     <build>
         <plugins>
             <!-- Executable Fat-JAR Builder (maven-shade-plugin) -->
