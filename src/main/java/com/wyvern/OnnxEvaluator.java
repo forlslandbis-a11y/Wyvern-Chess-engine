@@ -9,28 +9,22 @@ public class OnnxEvaluator {
     private OrtEnvironment env;
     private OrtSession session;
 
-    // Int32 Accumulator -> 센티폰(Centipawn) 변환 스케일 팩터
-    // 1 Int8 Unit = 10 센티폰 (0.1 Pawn)
-    private static final int INT8_SCALE_FACTOR = 10;
-    private static final int MATE_SCORE = 12700; // Int8 +127 -> Checkmate
-
     private OnnxEvaluator() {
         try {
             env = OrtEnvironment.getEnvironment();
             
-            // Int8 양자화 모델을 최우선 로드, 없으면 기본 모델 폴백
             InputStream modelStream = getClass().getResourceAsStream("/wyvern_int8.onnx");
             if (modelStream == null) {
                 modelStream = getClass().getResourceAsStream("/wyvern.onnx");
             }
             
             if (modelStream == null) {
-                throw new RuntimeException("ONNX 모델 파일(wyvern_int8.onnx 또는 wyvern.onnx)을 찾아올 수 없습니다.");
+                throw new RuntimeException("wyvern_int8.onnx 또는 wyvern.onnx 모델을 찾을 수 없습니다.");
             }
             
             byte[] modelBytes = modelStream.readAllBytes();
             session = env.createSession(modelBytes, new OrtSession.SessionOptions());
-            System.out.println("✅ Wyvern Int8 지원 ONNX 모델 로드 성공!");
+            System.out.println("✅ Wyvern Int8 연산 Evaluator 로드 성공!");
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -58,7 +52,7 @@ public class OnnxEvaluator {
     }
 
     /**
-     * Int32 Accumulator 기반 Value 추론 및 센티폰 단위 디스케일링
+     * Int8 연산 및 Int32 Accumulator 기반 Value 추론
      */
     public int predictValue(Board board) {
         try {
@@ -68,28 +62,37 @@ public class OnnxEvaluator {
             try (OrtSession.Result results = session.run(Collections.singletonMap("input", inputTensor))) {
                 Object rawValue = results.get("value").get().getValue();
                 
-                // Int32 Accumulator 연산 보정
-                int accumulator = 0;
+                // Int8 단위 연산 입력값 추출
+                byte int8RawValue = 0;
                 
-                if (rawValue instanceof float[][]) {
-                    float val = ((float[][]) rawValue)[0][0];
-                    // -1.0 ~ +1.0 출력을 Int8 스케일(-126 ~ +126) 레지스터 영역으로 변환
-                    accumulator = Math.round(val * 126.0f);
-                } else if (rawValue instanceof byte[][]) {
-                    // Int8 직접 출력일 경우 Int32 Accumulator에 바로 승격
-                    accumulator = (int) ((byte[][]) rawValue)[0][0];
+                if (rawValue instanceof byte[][]) {
+                    // Int8 ONNX 모델에서 출력된 순수 Int8 데이터 로드 (-128 ~ 127)
+                    int8RawValue = ((byte[][]) rawValue)[0][0];
+                } else if (rawValue instanceof float[][]) {
+                    // Float32 모델 폴백 시 Int8 스케일(-126 ~ +126)로 연산 스코어 변환
+                    float floatVal = ((float[][]) rawValue)[0][0];
+                    int8RawValue = (byte) Math.max(-127, Math.min(127, Math.round(floatVal * 126.0f)));
                 }
 
-                // 1. 강제 체크메이트 특수 임계값 처리 (+127 / -127)
-                if (accumulator >= 127) return MATE_SCORE;
-                if (accumulator <= -127) return -MATE_SCORE;
+                // ====================================================
+                // ⚡ Int8 연산 -> Int32 Accumulator 누적 프로세스
+                // ====================================================
+                
+                // 1. Int8 값을 Int32 Accumulator 레지스터에 승격하여 합산
+                int accumulator = (int) int8RawValue;
 
-                // 2. Int32 Accumulator -> Centipawns De-scaling (-1260 ~ +1260 cp)
-                int centipawns = accumulator * INT8_SCALE_FACTOR;
+                // 2. 강제 체크메이트 (+127 / -127) 판정
+                if (accumulator >= 127) return 12700;  // White Forced Mate
+                if (accumulator <= -127) return -12700; // Black Forced Mate
+
+                // 3. Int32 Accumulator 상에서 소수점/센티폰 변환 (1 Unit = 10 Centipawns = 0.1 Pawn)
+                int centipawns = accumulator * 10;
+                
+                // -12.6 ~ +12.6 Pawn (-1260 ~ +1260 cp) 범위 Clamping 후 최종 반환
                 return Math.max(-1260, Math.min(1260, centipawns));
             }
         } catch (Exception e) {
-            return 0; // 예외 발생 시 균형 포지션 반환
+            return 0; // 예외 시 0 cp 반환
         }
     }
 
