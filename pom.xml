@@ -3,18 +3,26 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
- 
+
     <groupId>com.wyvern</groupId>
     <artifactId>wyvern-chess-engine</artifactId>
     <version>1.0.0</version>
     <name>Wyvern Chess Engine</name>
- 
+
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
- 
+
+    <!-- chesslib는 Maven Central이 아니라 JitPack으로만 배포됨 -->
+    <repositories>
+        <repository>
+            <id>jitpack.io</id>
+            <url>https://jitpack.io</url>
+        </repository>
+    </repositories>
+
     <dependencies>
         <!--
           onnxruntime_gpu는 CUDA/TensorRT Execution Provider가 포함된 배포판이며
@@ -28,8 +36,16 @@
             <artifactId>onnxruntime_gpu</artifactId>
             <version>1.17.1</version>
         </dependency>
+
+        <!-- 검증된 체스 규칙(합법수 생성/FEN/체크 판정) 라이브러리.
+             Board.java의 더미 스텁을 이걸로 대체함. -->
+        <dependency>
+            <groupId>com.github.bhlangonijr</groupId>
+            <artifactId>chesslib</artifactId>
+            <version>1.3.7</version>
+        </dependency>
     </dependencies>
- 
+
     <build>
         <plugins>
             <!-- Executable Fat-JAR Builder (maven-shade-plugin) -->
@@ -56,4 +72,3 @@
         </plugins>
     </build>
 </project>
- 
