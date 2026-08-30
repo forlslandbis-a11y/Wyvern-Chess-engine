@@ -3,27 +3,33 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-
+ 
     <groupId>com.wyvern</groupId>
     <artifactId>wyvern-chess-engine</artifactId>
     <version>1.0.0</version>
     <name>Wyvern Chess Engine</name>
-
+ 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
-
+ 
     <dependencies>
-        <!-- ONNX Runtime Java API -->
+        <!--
+          onnxruntime_gpu는 CUDA/TensorRT Execution Provider가 포함된 배포판이며
+          CPU 전용 onnxruntime 아티팩트와 동시에 클래스패스에 두면 네이티브
+          라이브러리가 충돌하므로 반드시 이걸로 교체(둘 다 넣지 않음).
+          CUDA가 없는 환경에서도 이 아티팩트는 CPU 세션으로 정상 동작함
+          (OnnxEvaluator.java의 try/catch가 CUDA 부재를 흡수).
+        -->
         <dependency>
             <groupId>com.microsoft.onnxruntime</groupId>
-            <artifactId>onnxruntime</artifactId>
+            <artifactId>onnxruntime_gpu</artifactId>
             <version>1.17.1</version>
         </dependency>
     </dependencies>
-
+ 
     <build>
         <plugins>
             <!-- Executable Fat-JAR Builder (maven-shade-plugin) -->
@@ -50,3 +56,4 @@
         </plugins>
     </build>
 </project>
+ 
