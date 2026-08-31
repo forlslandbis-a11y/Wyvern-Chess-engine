@@ -3,7 +3,6 @@ package com.wyvern;
 import java.util.*;
 import com.github.bhlangonijr.chesslib.Side;
 import com.github.bhlangonijr.chesslib.Square;
-import com.github.bhlangonijr.chesslib.move.MoveList;
 import com.github.bhlangonijr.chesslib.move.MoveGenerator;
 
 /**
@@ -24,7 +23,10 @@ public class Board {
     }
 
     public List<Move> getLegalMoves() {
-        MoveList legalMoves = MoveGenerator.generateLegalMoves(inner);
+        // chesslib 1.3.7의 generateLegalMoves()는 MoveList가 아니라
+        // List<com.github.bhlangonijr.chesslib.move.Move>를 반환함
+        // (버전 간 API 차이 - 이전 버전은 MoveList로 잘못 가정했었음)
+        List<com.github.bhlangonijr.chesslib.move.Move> legalMoves = MoveGenerator.generateLegalMoves(inner);
         List<Move> result = new ArrayList<>(legalMoves.size());
         for (com.github.bhlangonijr.chesslib.move.Move m : legalMoves) {
             boolean capture = inner.getPiece(m.getTo()) != com.github.bhlangonijr.chesslib.Piece.NONE;
