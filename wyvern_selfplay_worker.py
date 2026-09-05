@@ -235,48 +235,89 @@ def self_play_game(engine, book_path, max_moves=80, depth=4):
     return states, policies, values
 
 
+_worker_engine = None  # 워커 프로세스별 전역 - initializer에서 한 번만 설정됨
+_worker_jar_path = None
+
+
+def _init_worker(jar_path):
+    """
+    Pool의 initializer로 등록되어 각 워커 프로세스가 시작될 때 딱 한 번만
+    호출됨. JVM을 여기서 한 번 띄우고 전역에 보관해두면, 이후 해당 워커가
+    처리하는 모든 작업(_self_play_worker 호출)이 이 JVM을 계속 재사용함.
+    기존에는 매 self_play_parallel() 호출(=매 에포크)마다 Pool을 새로
+    만들고 워커 함수 안에서 JVM을 새로 켰다 껐다 했는데, JVM 부팅 자체가
+    가볍지 않아 에포크마다 그 비용이 반복 발생했음 - 이를 없앰.
+    """
+    global _worker_engine, _worker_jar_path
+    _worker_jar_path = jar_path
+    if jar_path:
+        _worker_engine = WyvernEngineProcess(jar_path=jar_path)
+    else:
+        _worker_engine = _NullEngine()
+
+
 def _self_play_worker(args):
     """
-    멀티프로세싱 워커: 자기 자신의 JVM을 한 번만 띄우고, 배정된 게임
-    개수만큼 순차로 self-play를 진행해 결과를 모아 반환.
-    jar_path가 None이면(자바 엔진 빌드 실패) opening book + 랜덤 수로 폴백.
+    상주 워커 함수. JVM/엔진은 _init_worker()가 이미 띄워 전역에 보관해둔
+    것을 재사용하며, 여기서는 배정된 게임 개수만큼만 self-play를 수행.
     """
-    jar_path, num_games, depth, book_path = args
-
-    if jar_path:
-        engine = WyvernEngineProcess(jar_path=jar_path)
-    else:
-        engine = _NullEngine()
-
+    num_games, depth, book_path = args
     results = []
-    try:
-        for _ in range(num_games):
-            results.append(self_play_game(engine, book_path=book_path, depth=depth))
-    finally:
-        if jar_path:
-            engine.close()
+    for _ in range(num_games):
+        results.append(self_play_game(_worker_engine, book_path=book_path, depth=depth))
     return results
+
+
+class PersistentSelfPlayPool:
+    """
+    학습 루프 시작 전에 한 번 생성해 계속 재사용하는 워커 풀 래퍼.
+    워커 프로세스와 그 안의 JVM이 학습 종료까지 상주하므로, 매 에포크
+    self_play_parallel()을 호출할 때마다 Pool과 JVM을 새로 만들던
+    기존 방식의 오버헤드가 사라짐. 사용 후 반드시 close()를 호출해
+    워커 프로세스(및 워커가 들고 있는 JVM)를 정리해야 함.
+    """
+    def __init__(self, jar_path, num_workers=None):
+        if num_workers is None:
+            # JVM 부팅 자체가 CPU를 많이 먹으므로 코어 수와 동일하게 띄우면
+            # OS 스케줄링/JVM 간 코어 경합으로 개별 처리량이 오히려
+            # 떨어질 수 있어 코어 수보다 하나 적게 잡음.
+            num_workers = max(1, (os.cpu_count() or 4) - 1)
+        self.num_workers = num_workers
+        self.jar_path = jar_path
+        ctx = mp.get_context("spawn")
+        self.pool = ctx.Pool(
+            processes=num_workers,
+            initializer=_init_worker,
+            initargs=(jar_path,),
+        )
+
+    def run_games(self, total_games, book_path, depth=4):
+        num_workers = min(self.num_workers, total_games)
+        base, remainder = divmod(total_games, num_workers)
+        per_worker_counts = [base + (1 if i < remainder else 0) for i in range(num_workers)]
+        per_worker_counts = [c for c in per_worker_counts if c > 0]
+
+        worker_args = [(count, depth, book_path) for count in per_worker_counts]
+
+        all_results = []
+        for worker_games in self.pool.imap_unordered(_self_play_worker, worker_args):
+            all_results.extend(worker_games)
+        return all_results
+
+    def close(self):
+        self.pool.close()
+        self.pool.join()
 
 
 def self_play_parallel(jar_path, total_games, book_path, depth=4, num_workers=None):
     """
-    total_games개의 self-play 게임을 num_workers개의 프로세스(각자 JVM 보유)로
-    나눠 병렬 실행. num_workers 기본값은 CPU 코어 수.
-    jar_path가 None이면 모든 워커가 opening book + 랜덤 수로 폴백.
+    하위 호환용 1회성 호출 함수 (Pool을 매번 새로 만들고 닫음).
+    학습 루프처럼 반복 호출하는 경우에는 PersistentSelfPlayPool을 직접
+    만들어 재사용하는 것이 훨씬 빠름 - 3번 셀의 train_wyvern_auto_timeout은
+    PersistentSelfPlayPool을 사용하도록 변경됨.
     """
-    if num_workers is None:
-        num_workers = max(1, os.cpu_count() or 4)
-    num_workers = min(num_workers, total_games)
-
-    base, remainder = divmod(total_games, num_workers)
-    per_worker_counts = [base + (1 if i < remainder else 0) for i in range(num_workers)]
-    per_worker_counts = [c for c in per_worker_counts if c > 0]
-
-    worker_args = [(jar_path, count, depth, book_path) for count in per_worker_counts]
-
-    all_results = []
-    ctx = mp.get_context("spawn")
-    with ctx.Pool(processes=len(worker_args)) as pool:
-        for worker_games in pool.imap_unordered(_self_play_worker, worker_args):
-            all_results.extend(worker_games)
-    return all_results
+    pool = PersistentSelfPlayPool(jar_path=jar_path, num_workers=num_workers)
+    try:
+        return pool.run_games(total_games=total_games, book_path=book_path, depth=depth)
+    finally:
+        pool.close()
