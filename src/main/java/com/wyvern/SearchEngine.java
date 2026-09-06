@@ -3,16 +3,50 @@ package com.wyvern;
 import java.util.*;
 
 public class SearchEngine {
-    private static final int BEAM_WIDTH = 4; 
-    private static final int INF = 100000;    
+    private static final int BEAM_WIDTH = 4;
+    private static final int INF = 100000;
 
     private final OnnxEvaluator nnEvaluator = OnnxEvaluator.getInstance();
 
+    // ===== 프로파일링 계측용 카운터 =====
+    // stdout은 UCI 프로토콜 전용이라 오염되면 안 되므로 반드시 stderr로 출력.
+    // 매 노드마다 출력하면 그 자체가 새로운 오버헤드가 되므로, 탐색 1회
+    // (searchBestMove 한 번 호출) 종료 시 요약만 출력한다.
+    private static final boolean PROFILE_ENABLED =
+        "1".equals(System.getenv("WYVERN_PROFILE"));
+
+    private long profNodesVisited = 0;
+    private long profOnnxCalls = 0;
+    private long profOnnxNanos = 0;
+    private long profQuiescenceCalls = 0;
+
+    private void resetProfileCounters() {
+        profNodesVisited = 0;
+        profOnnxCalls = 0;
+        profOnnxNanos = 0;
+        profQuiescenceCalls = 0;
+    }
+
+    private void printProfileSummary(long totalNanos) {
+        if (!PROFILE_ENABLED) return;
+        double totalMs = totalNanos / 1_000_000.0;
+        double onnxMs = profOnnxNanos / 1_000_000.0;
+        double onnxPct = totalMs > 0 ? (onnxMs / totalMs * 100.0) : 0.0;
+        System.err.printf(
+            "info string [PROFILE] total=%.2fms nodes=%d onnxCalls=%d onnxTime=%.2fms(%.1f%%) quiesceCalls=%d avgOnnxCall=%.3fms%n",
+            totalMs, profNodesVisited, profOnnxCalls, onnxMs, onnxPct, profQuiescenceCalls,
+            profOnnxCalls > 0 ? onnxMs / profOnnxCalls : 0.0
+        );
+        System.err.flush();
+    }
+
     public Move searchBestMove(Board board, int depth) {
+        resetProfileCounters();
+        long searchStart = PROFILE_ENABLED ? System.nanoTime() : 0;
+
         List<Move> legalMoves = board.getLegalMoves();
         if (legalMoves.isEmpty()) return null;
 
-        // [1단 연산] 루트 노드에서는 Policy로 상위 K개 후보 필터링
         List<Move> topBeamMoves = filterTopKByPolicy(board, legalMoves, BEAM_WIDTH);
 
         Move bestMove = null;
@@ -20,7 +54,6 @@ public class SearchEngine {
         int alpha = -INF;
         int beta = INF;
 
-        // [2단 연산] 선택된 Top-K 핵심 수 Alpha-Beta 수직 탐색
         for (Move move : topBeamMoves) {
             board.makeMove(move);
             int score = -deepSearch(board, depth - 1, -beta, -alpha);
@@ -35,13 +68,11 @@ public class SearchEngine {
             }
         }
 
-        // [3단 연산: Safety Sweep] Policy 탈락 수 검증 (Alpha-Beta 윈도우 정상 전달)
         List<Move> discardedMoves = new ArrayList<>(legalMoves);
         discardedMoves.removeAll(topBeamMoves);
 
         for (Move move : discardedMoves) {
             board.makeMove(move);
-            // 전체 윈도우 대신 현재 알파 기준으로 컷오프 여부만 빠르게 확인
             int quickScore = -quiescenceSearch(board, -alpha - 1, -alpha);
             board.undoMove(move);
 
@@ -59,13 +90,23 @@ public class SearchEngine {
             }
         }
 
+        if (PROFILE_ENABLED) {
+            long searchEnd = System.nanoTime();
+            printProfileSummary(searchEnd - searchStart);
+        }
+
         return bestMove;
     }
 
     private List<Move> filterTopKByPolicy(Board board, List<Move> moves, int k) {
         if (moves.size() <= k) return moves;
 
+        long t0 = PROFILE_ENABLED ? System.nanoTime() : 0;
         float[] policyArray = nnEvaluator.predictPolicy(board);
+        if (PROFILE_ENABLED) {
+            profOnnxCalls++;
+            profOnnxNanos += (System.nanoTime() - t0);
+        }
 
         List<Move> sorted = new ArrayList<>(moves);
         sorted.sort((a, b) -> Float.compare(
@@ -77,20 +118,20 @@ public class SearchEngine {
     }
 
     private int deepSearch(Board board, int depth, int alpha, int beta) {
+        if (PROFILE_ENABLED) profNodesVisited++;
+
         if (depth <= 0) {
             return quiescenceSearch(board, alpha, beta);
         }
 
         List<Move> moves = board.getLegalMoves();
         if (moves.isEmpty()) {
-            if (board.isInCheck()) return -INF + 100; // 체크메이트
-            return 0; // 스테일메이트 (무승부)
+            if (board.isInCheck()) return -INF + 100;
+            return 0;
         }
 
-        // 💡 깊은 노드에서는 ONNX 재호출 대신 기물 캡처 우선(MVV-LVA) 단순 정렬로 대체하여 속도 10배 향상
         moves.sort((a, b) -> Integer.compare(b.getCapturePriority(), a.getCapturePriority()));
 
-        // 깊이가 얕아질수록 Beam Width를 조금씩 좁힘
         int moveLimit = Math.min(moves.size(), BEAM_WIDTH);
 
         for (int i = 0; i < moveLimit; i++) {
@@ -99,23 +140,26 @@ public class SearchEngine {
             int score = -deepSearch(board, depth - 1, -beta, -alpha);
             board.undoMove(move);
 
-            if (score >= beta) return beta; // Cutoff
+            if (score >= beta) return beta;
             if (score > alpha) alpha = score;
         }
         return alpha;
     }
 
     private int quiescenceSearch(Board board, int alpha, int beta) {
+        if (PROFILE_ENABLED) {
+            profNodesVisited++;
+            profQuiescenceCalls++;
+        }
+
         int standPat = evaluatePosition(board);
         if (standPat >= beta) return beta;
         if (alpha < standPat) alpha = standPat;
 
         List<Move> captureMoves = board.getCaptureMoves();
-        // 캡처 수 MVV-LVA 정렬
         captureMoves.sort((a, b) -> Integer.compare(b.getCapturePriority(), a.getCapturePriority()));
 
         for (Move move : captureMoves) {
-            // Delta Pruning: 잡아서 얻는 이득으로도 alpha를 못 넘기면 가지치기
             if (standPat + move.getCapturedPieceValue() + 200 < alpha) continue;
 
             board.makeMove(move);
@@ -129,7 +173,12 @@ public class SearchEngine {
     }
 
     private int evaluatePosition(Board board) {
+        long t0 = PROFILE_ENABLED ? System.nanoTime() : 0;
         int nnCentipawns = nnEvaluator.predictValue(board);
+        if (PROFILE_ENABLED) {
+            profOnnxCalls++;
+            profOnnxNanos += (System.nanoTime() - t0);
+        }
 
         if (Math.abs(nnCentipawns) >= 12700) {
             return nnCentipawns;
