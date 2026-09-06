@@ -14,6 +14,7 @@ import 경로로 이 파일을 찾을 수 있으므로 spawn 방식이 정상 �
 """
 
 import os
+import sys
 import random
 import subprocess
 import threading
@@ -58,13 +59,17 @@ class WyvernEngineProcess:
     타임아웃을 두고 기다림. readline()을 직접 블로킹 호출하면 자바 쪽이
     응답을 못 줄 때 프로세스 전체가 무기한 멈출 수 있어 이 방식으로 회피.
     """
-    def __init__(self, jar_path, timeout=10):
+    def __init__(self, jar_path, timeout=10, profile=False):
         self.jar_path = jar_path
         self.timeout = timeout
+        self.profile = profile  # True면 자바 쪽 WYVERN_PROFILE=1로 기동해 탐색 프로파일 로그를 남김
         self._consecutive_timeouts = 0
         self._start_process()
 
     def _start_process(self):
+        env = os.environ.copy()
+        if self.profile:
+            env["WYVERN_PROFILE"] = "1"
         self.proc = subprocess.Popen(
             ["java", "-jar", self.jar_path],
             stdin=subprocess.PIPE,
@@ -72,6 +77,7 @@ class WyvernEngineProcess:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,  # line-buffered
+            env=env,
         )
         self._lock = threading.Lock()
         self._out_queue = queue.Queue()
@@ -79,6 +85,13 @@ class WyvernEngineProcess:
             target=self._reader_loop, daemon=True
         )
         self._reader_thread.start()
+        # stderr(프로파일 로그 등)를 읽어가지 않으면 파이프 버퍼가 차서
+        # 자바 프로세스가 멈출 수 있으므로 별도 스레드로 계속 소비.
+        # profile=True일 때는 그대로 Python stderr에 흘려 보여줌.
+        self._stderr_thread = threading.Thread(
+            target=self._stderr_loop, daemon=True
+        )
+        self._stderr_thread.start()
         self._send("uci")
         self._read_until("uciok", timeout=self.timeout)
 
@@ -86,6 +99,14 @@ class WyvernEngineProcess:
         try:
             for line in self.proc.stdout:
                 self._out_queue.put(line.strip())
+        except Exception:
+            pass
+
+    def _stderr_loop(self):
+        try:
+            for line in self.proc.stderr:
+                if self.profile:
+                    print(line.rstrip(), file=sys.stderr)
         except Exception:
             pass
 
@@ -109,7 +130,77 @@ class WyvernEngineProcess:
                 return lines
         return lines
 
+    def start_new_game(self):
+        """
+        새 게임 시작 시 1회 호출 - 자바 쪽 보드를 시작 국면으로 리셋.
+        이후 매 수는 play_move_and_search()로 점진 진행하여 FEN 재구성
+        비용(문자열 파싱 + 보드 풀 리셋)을 없앤다.
+        """
+        if self.proc.poll() is not None:
+            self._restart()
+            self._consecutive_timeouts = 0
+        with self._lock:
+            try:
+                self._send("newgame")
+                self._read_until("newgameok", timeout=self.timeout)
+            except Exception:
+                pass
+
+    def sync_move(self, move_uci: str):
+        """
+        탐색 없이 수만 자바 쪽 보드에 반영(동기화 전용). book move나
+        최종 채택된 수를 엔진 상태에 알려줄 때 사용 - play_move_and_search와
+        달리 go/bestmove 왕복이 없어 더 가벼움.
+        """
+        if self.proc.poll() is not None:
+            self._restart()
+            self._consecutive_timeouts = 0
+        with self._lock:
+            try:
+                self._send(f"move {move_uci}")
+                self._read_until("move", timeout=self.timeout)
+            except Exception:
+                pass
+
+    def search_only(self, depth: int = 4, search_timeout: float = 15.0):
+        """
+        현재(이미 동기화된) 국면에서 순수 탐색만 수행. 수 반영은 항상
+        sync_move()로 미리 끝내두므로 여기서는 "go depth N" 왕복만 발생 -
+        기존 get_best_move()의 "매번 FEN 전체 전송" 대비 훨씬 가벼움.
+        """
+        RESTART_THRESHOLD = 5
+
+        if self.proc.poll() is not None:
+            self._restart()
+            self._consecutive_timeouts = 0
+
+        with self._lock:
+            try:
+                self._send(f"go depth {depth}")
+                lines = self._read_until("bestmove", timeout=search_timeout)
+                self._consecutive_timeouts = 0
+                for line in lines:
+                    if line.startswith("bestmove"):
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[1] != "0000":
+                            return chess.Move.from_uci(parts[1])
+                return None
+            except TimeoutError:
+                self._consecutive_timeouts += 1
+                if self._consecutive_timeouts >= RESTART_THRESHOLD:
+                    print(f"⚠️ 연속 {self._consecutive_timeouts}회 타임아웃 - 엔진을 재시작합니다.")
+                    self._restart()
+                    self._consecutive_timeouts = 0
+                return None
+            except Exception:
+                return None
+
     def get_best_move(self, fen: str, depth: int = 4, search_timeout: float = 15.0):
+        """
+        하위 호환용 - 매번 FEN 전체를 전송해 국면을 재구성하는 방식.
+        게임이 이어지는 self-play에서는 play_move_and_search()가 훨씬
+        가벼우므로 self_play_game()은 그쪽을 사용하도록 변경됨.
+        """
         RESTART_THRESHOLD = 5
 
         if self.proc.poll() is not None:
@@ -200,6 +291,15 @@ def self_play_game(engine, book_path, max_moves=80, depth=4):
     states, policies, values = [], [], []
     turns = []
 
+    # 상태 유지형 프로토콜 사용 시, 자바 쪽 보드도 게임 시작 시 1회
+    # 리셋해두고 이후 모든 수(북 무브 포함)를 move 명령으로 계속
+    # 동기화해야 함. book move는 Python이 결정하지만 엔진에는 아직
+    # 알려주지 않은 상태이므로, 매 수마다 반드시 반영해줘야 다음 탐색이
+    # 올바른 국면 기준으로 이뤄짐.
+    use_stateful = hasattr(engine, "start_new_game")
+    if use_stateful:
+        engine.start_new_game()
+
     while not board.is_game_over() and len(states) < max_moves:
         legal_moves = list(board.legal_moves)
         if not legal_moves:
@@ -211,13 +311,28 @@ def self_play_game(engine, book_path, max_moves=80, depth=4):
             chosen_move = select_opening_move(board, book_path=book_path, temperature=0.8)
 
         if chosen_move is None:
-            fen = board.fen()
-            best_move = engine.get_best_move(fen, depth=depth)
+            if use_stateful:
+                # 직전 수는 이미 sync_move()로 반영돼 있으므로 순수 탐색만 수행.
+                best_move = engine.search_only(depth=depth)
+            else:
+                fen = board.fen()
+                best_move = engine.get_best_move(fen, depth=depth)
 
             if best_move and best_move in legal_moves:
                 chosen_move = best_move
             else:
                 chosen_move = random.choice(legal_moves)
+
+            if use_stateful:
+                # 탐색이 반환한 수와 실제로 채택한 수(합법성 검증 실패 시
+                # 랜덤으로 대체될 수 있음)가 다를 수 있으므로, 최종 채택된
+                # 수를 엔진에 반드시 반영해 상태를 동기화.
+                engine.sync_move(chosen_move.uci())
+        elif use_stateful:
+            # book move가 선택된 경우: 엔진 상태를 이 수만큼 앞으로 진행시켜
+            # 동기화만 유지 (탐색 없음 - sync_move는 go/bestmove 왕복이 없어
+            # play_move_and_search(depth=0)보다 가벼움).
+            engine.sync_move(chosen_move.uci())
 
         states.append(board_to_tensor(board))
         policies.append(move_to_index(chosen_move))
@@ -239,7 +354,7 @@ _worker_engine = None  # 워커 프로세스별 전역 - initializer에서 한 �
 _worker_jar_path = None
 
 
-def _init_worker(jar_path):
+def _init_worker(jar_path, profile=False):
     """
     Pool의 initializer로 등록되어 각 워커 프로세스가 시작될 때 딱 한 번만
     호출됨. JVM을 여기서 한 번 띄우고 전역에 보관해두면, 이후 해당 워커가
@@ -247,11 +362,13 @@ def _init_worker(jar_path):
     기존에는 매 self_play_parallel() 호출(=매 에포크)마다 Pool을 새로
     만들고 워커 함수 안에서 JVM을 새로 켰다 껐다 했는데, JVM 부팅 자체가
     가볍지 않아 에포크마다 그 비용이 반복 발생했음 - 이를 없앰.
+    profile=True면 워커의 JVM이 WYVERN_PROFILE=1로 기동되어 탐색당
+    노드 수/ONNX 호출 시간 요약을 stderr로 출력함(성능 확인용).
     """
     global _worker_engine, _worker_jar_path
     _worker_jar_path = jar_path
     if jar_path:
-        _worker_engine = WyvernEngineProcess(jar_path=jar_path)
+        _worker_engine = WyvernEngineProcess(jar_path=jar_path, profile=profile)
     else:
         _worker_engine = _NullEngine()
 
@@ -276,7 +393,7 @@ class PersistentSelfPlayPool:
     기존 방식의 오버헤드가 사라짐. 사용 후 반드시 close()를 호출해
     워커 프로세스(및 워커가 들고 있는 JVM)를 정리해야 함.
     """
-    def __init__(self, jar_path, num_workers=None):
+    def __init__(self, jar_path, num_workers=None, profile=False):
         if num_workers is None:
             # JVM 부팅 자체가 CPU를 많이 먹으므로 코어 수와 동일하게 띄우면
             # OS 스케줄링/JVM 간 코어 경합으로 개별 처리량이 오히려
@@ -288,8 +405,9 @@ class PersistentSelfPlayPool:
         self.pool = ctx.Pool(
             processes=num_workers,
             initializer=_init_worker,
-            initargs=(jar_path,),
+            initargs=(jar_path, profile),
         )
+
 
     def run_games(self, total_games, book_path, depth=4):
         num_workers = min(self.num_workers, total_games)
