@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wyvern — a self-play chess engine</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+  :root {
+    --bg: #0d1210;
+    --panel: #141a17;
+    --border: #1f2622;
+    --text: #eef1ee;
+    --dim: #8b9891;
+    --accent: #3ddc84;
+    --accent-dim: rgba(61, 220, 132, 0.12);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent); text-decoration: none; }
+
+  .shell { max-width: 1040px; margin: 0 auto; padding: 0 2rem; }
+
+  /* ---------- nav ---------- */
+  nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2rem 0;
+  }
+  .logo {
+    font-weight: 700;
+    font-size: 1.2rem;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+  }
+  .logo .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .navlinks { display: flex; gap: 2.5rem; }
+  .navlinks a {
+    color: var(--dim);
+    font-size: 0.9rem;
+    font-weight: 500;
+    transition: color 0.15s;
+  }
+  .navlinks a:hover { color: var(--text); }
+
+  /* ---------- hero ---------- */
+  .hero {
+    display: grid;
+    grid-template-columns: 1.15fr 0.85fr;
+    gap: 3rem;
+    align-items: center;
+    padding: 4rem 0 5.5rem;
+  }
+  h1 {
+    font-weight: 800;
+    font-size: 3.1rem;
+    line-height: 1.12;
+    letter-spacing: -0.03em;
+    margin: 0 0 1.4rem;
+  }
+  .hero p.lede {
+    font-size: 1.1rem;
+    font-weight: 400;
+    color: var(--dim);
+    max-width: 38ch;
+    margin: 0 0 2.25rem;
+  }
+  .cta-row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+  .btn {
+    display: inline-block;
+    padding: 0.75rem 1.4rem;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 0.92rem;
+    transition: opacity 0.15s;
+  }
+  .btn-primary { background: var(--accent); color: #06130a; }
+  .btn-primary:hover { opacity: 0.88; }
+  .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  .btn-ghost:hover { border-color: var(--dim); }
+
+  .graphic { display: flex; justify-content: center; align-items: center; }
+  .graphic svg { width: 100%; max-width: 320px; height: auto; }
+
+  /* ---------- stat bar ---------- */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    padding: 2rem 0;
+    margin-bottom: 5.5rem;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .stat .n {
+    font-size: 1.65rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--accent);
+  }
+  .stat .label {
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--dim);
+    margin-top: 0.3rem;
+  }
+
+  /* ---------- sections ---------- */
+  section { margin-bottom: 5.5rem; }
+  .eyebrow {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+    margin: 0 0 0.6rem;
+  }
+  h2 {
+    font-weight: 700;
+    font-size: 1.55rem;
+    letter-spacing: -0.02em;
+    margin: 0 0 2rem;
+  }
+
+  .split {
+    display: grid;
+    grid-template-columns: 1.1fr 0.9fr;
+    gap: 3rem;
+    align-items: start;
+  }
+  .split p { color: var(--dim); font-weight: 400; margin: 0 0 1.1rem; }
+  .split p:last-child { margin-bottom: 0; }
+  code {
+    font-family: ui-monospace, monospace;
+    font-size: 0.9em;
+    color: var(--text);
+    background: var(--accent-dim);
+    padding: 0.1em 0.4em;
+    border-radius: 4px;
+  }
+
+  .arch-panel {
+    background: var(--panel);
+    border-radius: 12px;
+    padding: 1.6rem 1.7rem;
+    font-family: ui-monospace, monospace;
+    font-size: 0.78rem;
+    line-height: 1.75;
+    color: #a3b8a9;
+    white-space: pre;
+    overflow-x: auto;
+  }
+
+  .steps {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1rem;
+  }
+  .step {
+    background: var(--panel);
+    border-radius: 12px;
+    padding: 1.5rem 1.6rem;
+  }
+  .step .idx {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 0.7rem;
+  }
+  .step h3 { font-size: 1rem; font-weight: 600; margin: 0 0 0.45rem; letter-spacing: -0.01em; }
+  .step p { color: var(--dim); font-size: 0.9rem; font-weight: 400; margin: 0; }
+
+  .status-block {
+    background: var(--panel);
+    border-radius: 12px;
+    padding: 1.75rem 1.9rem;
+    color: var(--dim);
+    font-weight: 400;
+  }
+  .status-block strong { color: var(--text); font-weight: 600; }
+
+  .stack-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.4rem 2.5rem;
+  }
+  .stack-grid dt {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--accent);
+    padding-top: 1rem;
+  }
+  .stack-grid dd {
+    margin: 0.25rem 0 0.55rem;
+    color: var(--dim);
+    font-size: 0.92rem;
+    font-weight: 400;
+  }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 2.25rem 0 3.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 1rem;
+    color: var(--dim);
+    font-size: 0.88rem;
+    font-weight: 400;
+  }
+  footer a { color: var(--text); font-weight: 500; }
+
+  @media (max-width: 860px) {
+    .hero { grid-template-columns: 1fr; padding-top: 2rem; }
+    .graphic { order: -1; max-width: 220px; margin: 0 auto 0.5rem; }
+    h1 { font-size: 2.3rem; }
+    .stats { grid-template-columns: repeat(2, 1fr); row-gap: 1.5rem; }
+    .split { grid-template-columns: 1fr; }
+    .steps { grid-template-columns: 1fr; }
+    .stack-grid { grid-template-columns: 1fr; }
+    .navlinks { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <nav>
+    <div class="logo"><span class="dot"></span>Wyvern</div>
+    <div class="navlinks">
+      <a href="#architecture">Architecture</a>
+      <a href="#training">Training</a>
+      <a href="#status">Status</a>
+      <a href="https://github.com/forlslandbis-a11y/Wyvern-Chess-engine">Source</a>
+    </div>
+  </nav>
+
+  <div class="hero">
+    <div>
+      <h1>A chess engine that learns from itself.</h1>
+      <p class="lede">Policy/value network, alpha-beta search, and a self-play loop that keeps both getting stronger — built solo, end to end.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/forlslandbis-a11y/Wyvern-Chess-engine">View on GitHub</a>
+        <a class="btn btn-ghost" href="#architecture">See how it works</a>
+      </div>
+    </div>
+    <div class="graphic">
+      <svg viewBox="0 0 300 300" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <g opacity="0.3" stroke="#3ddc84" stroke-width="1">
+          <line x1="150" y1="60" x2="215" y2="110"/>
+          <line x1="215" y1="110" x2="198" y2="185"/>
+          <line x1="198" y1="185" x2="118" y2="205"/>
+          <line x1="118" y1="205" x2="62" y2="150"/>
+          <line x1="62" y1="150" x2="88" y2="88"/>
+          <line x1="88" y1="88" x2="150" y2="60"/>
+          <line x1="150" y1="60" x2="118" y2="205"/>
+          <line x1="215" y1="110" x2="62" y2="150"/>
+        </g>
+        <circle cx="150" cy="60" r="6" fill="#3ddc84"/>
+        <circle cx="215" cy="110" r="4.5" fill="#3ddc84" opacity="0.7"/>
+        <circle cx="198" cy="185" r="7" fill="#3ddc84"/>
+        <circle cx="118" cy="205" r="4.5" fill="#3ddc84" opacity="0.7"/>
+        <circle cx="62" cy="150" r="5.5" fill="#3ddc84" opacity="0.85"/>
+        <circle cx="88" cy="88" r="4.5" fill="#3ddc84" opacity="0.6"/>
+      </svg>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><span class="n">2</span><span class="label">residual blocks</span></div>
+    <div class="stat"><span class="n">1968</span><span class="label">policy classes</span></div>
+    <div class="stat"><span class="n">~21M</span><span class="label">pretraining games</span></div>
+    <div class="stat"><span class="n">4-ply</span><span class="label">search depth</span></div>
+  </div>
+
+  <section id="architecture">
+    <p class="eyebrow">01 — Architecture</p>
+    <h2>Two languages, one game</h2>
+    <div class="split">
+      <div>
+        <p>Python owns training and orchestration. Java owns move search. They're split on purpose — training benefits from PyTorch's ecosystem, search benefits from running close to the metal.</p>
+        <p>The two talk over a small stateful protocol built for this project, not the standard UCI handshake. Instead of re-sending a full board position on every move, the Java side keeps a live game in memory and just gets told what move was played. Self-play runs thousands of games; that difference adds up.</p>
+        <p>Chess rules — legal moves, check detection, FEN handling — come from <code>chesslib</code> rather than a hand-rolled implementation.</p>
+      </div>
+      <div class="arch-panel">Python (training)             Java (search)
+├─ WyvernNet (PyTorch)  ◄──►  ├─ chesslib rules
+├─ self-play workers,         ├─ alpha-beta + beam
+│  one JVM per CPU core       │  search, quiescence
+└─ replay buffer on disk      └─ ONNX Runtime eval</div>
+    </div>
+  </section>
+
+  <section id="training">
+    <p class="eyebrow">02 — Training loop</p>
+    <h2>How it learns</h2>
+    <div class="steps">
+      <div class="step">
+        <span class="idx">Warm start</span>
+        <h3>Pretraining</h3>
+        <p>Optional supervised pass on real games — Lichess and Chess.com PGNs filtered to 2500+ ELO, roughly 21 million games — before self-play begins.</p>
+      </div>
+      <div class="step">
+        <span class="idx">Self-play</span>
+        <h3>Parallel games</h3>
+        <p>One worker process per CPU core, each with its own JVM, playing games and logging every position: board state, move played, final outcome.</p>
+      </div>
+      <div class="step">
+        <span class="idx">Training step</span>
+        <h3>Policy + value</h3>
+        <p>Cross-entropy on policy, MSE on value, with an entropy term so the policy doesn't collapse too early. Updated weights feed the next round.</p>
+      </div>
+      <div class="step">
+        <span class="idx">Export</span>
+        <h3>Quantize</h3>
+        <p>Weights convert to ONNX, then int8 for faster inference — CPU via AVX2/VNNI, or CUDA where available.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="status">
+    <p class="eyebrow">03 — Status</p>
+    <h2>Where it stands</h2>
+    <div class="status-block">
+      <p><strong>Running on a 4-core Kaggle notebook</strong>, and that's the real ceiling right now — self-play throughput scales with CPU core count almost linearly. Over-provisioning workers past the core count was tried once, on the assumption that idle time waiting on search would hide the extra concurrency. Instead the JVMs fought each other for startup time and everything got slower. So the bottleneck is measured, not assumed — more cores would translate directly into more training games per hour.</p>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Stack</p>
+    <h2>Built with</h2>
+    <dl class="stack-grid">
+      <dt>Training</dt><dd>PyTorch, ONNX Runtime (quantization)</dd>
+      <dt>Search engine</dt><dd>Java 17, Maven, chesslib</dd>
+      <dt>Parallelism</dt><dd>Python multiprocessing, one JVM per worker</dd>
+      <dt>Game data</dt><dd>Lichess / Chess.com PGNs, streamed from zstandard</dd>
+      <dt>Packaging</dt><dd>Maven Shade (fat jar), GitHub Releases</dd>
+    </dl>
+  </section>
+
+  <footer>
+    <span>Wyvern is a solo, in-progress project.</span>
+    <a href="https://github.com/forlslandbis-a11y/Wyvern-Chess-engine">github.com/forlslandbis-a11y/Wyvern-Chess-engine</a>
+  </footer>
+
+</div>
+</body>
+</html>
